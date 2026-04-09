@@ -1,0 +1,14 @@
+# 忽略日志目录
+dev/log/
+train/log/
+
+# 忽略所有 .log 文件
+*.log
+
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+
+# 忽略 IDE 配置（可选）
+.vscode/
+.idea/
