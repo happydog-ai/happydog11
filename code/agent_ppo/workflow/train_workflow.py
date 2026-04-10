@@ -179,6 +179,8 @@ class EpisodeRunner:
                     next_value=np.zeros(Config.VALUE_NUM, dtype=np.float32),
                     advantage=np.zeros(Config.VALUE_NUM, dtype=np.float32),
                     prob=np.array(act_data.prob, dtype=np.float32),
+                    efficiency_reward=np.array([reward_info["efficiency_reward"]], dtype=np.float32),
+                    npc_avoid_reward = np.array([reward_info["npc_avoid_reward"]], dtype=np.float32),
                 )
                 collector.append(frame)
 

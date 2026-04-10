@@ -50,6 +50,8 @@ SampleData = create_cls(
     next_value=Config.VALUE_NUM,
     advantage=Config.VALUE_NUM,         # 1D GAE advantage / GAE 优势
     prob=Config.ACTION_NUM,             # 8D action probabilities / 动作概率
+    efficiency_reward = Config.VALUE_NUM,
+    npc_avoid_reward  = Config.VALUE_NUM,
 )
 
 

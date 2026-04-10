@@ -62,27 +62,39 @@ def build_monitor():
         )
         .end_panel()
 
-        .add_panel(
-            name="障碍物安全奖励",
-            name_en="obstacle_reward",
+            .add_panel(
+            name="远离npc奖励",
+            name_en="npc_avoid_reward",
             type="line",
         )
         .add_metric(
-            metrics_name="obstacle_reward",
-            expr="avg(obstacle_reward{})",
+            metrics_name="npc_avoid_reward",
+            expr="avg(dirt_approach_reward{})",
         )
         .end_panel()
 
-        .add_panel(
-            name="充电桩奖励",
-            name_en="charger_reward",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="charger_reward",
-            expr="avg(charger_reward{})",
-        )
-        .end_panel()
+
+        # .add_panel(
+        #     name="障碍物安全奖励",
+        #     name_en="obstacle_reward",
+        #     type="line",
+        # )
+        # .add_metric(
+        #     metrics_name="obstacle_reward",
+        #     expr="avg(obstacle_reward{})",
+        # )
+        # .end_panel()
+
+        # .add_panel(
+        #     name="充电桩奖励",
+        #     name_en="charger_reward",
+        #     type="line",
+        # )
+        # .add_metric(
+        #     metrics_name="charger_reward",
+        #     expr="avg(charger_reward{})",
+        # )
+        # .end_panel()
 
         .add_panel(
             name="时间惩罚",
@@ -137,6 +149,17 @@ def build_monitor():
         .add_metric(
             metrics_name="entropy_loss",
             expr="avg(entropy_loss{})",
+        )
+        .end_panel()
+
+        .add_panel(
+            name="连续清扫奖励",
+            name_en="efficiency_reward",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="efficiency_reward",
+            expr="avg(efficiency_reward{})",
         )
         .end_panel()
 

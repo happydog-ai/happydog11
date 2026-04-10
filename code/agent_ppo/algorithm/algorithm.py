@@ -59,7 +59,8 @@ class Algorithm:
         obstacle_reward = float(np.mean([s.obstacle_reward for s in list_sample_data]))
         charger_reward = float(np.mean([s.charger_reward for s in list_sample_data]))
         step_penalty = float(np.mean([s.step_penalty for s in list_sample_data]))
-
+        efficiency_reward = float(np.mean([s.efficiency_reward for s in list_sample_data]))
+        npc_avoid_reward = float(np.mean([s.npc_avoid_reward for s in list_sample_data]))
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
@@ -106,6 +107,8 @@ class Algorithm:
             results["obstacle_reward"] = round(obstacle_reward, 4)
             results["charger_reward"] = round(charger_reward, 4)
             results["step_penalty"] = round(step_penalty, 4)
+            results["efficiency_reward"] = round(efficiency_reward, 4)
+            results["npc_avoid_reward"] = round(npc_avoid_reward, 4)
 
             self.logger.info(
                 f"policy_loss: {results['policy_loss']}, "
@@ -116,7 +119,9 @@ class Algorithm:
                 f"dirt_approach_reward: {results['dirt_approach_reward']}, "
                 f"obstacle_reward: {results['obstacle_reward']}, "
                 f"charger_reward: {results['charger_reward']}, "
-                f"step_penalty: {results['step_penalty']}"
+                f"step_penalty: {results['step_penalty']},"
+                f"efficiency_reward: {results['efficiency_reward']},"
+                f"npc_avoid_reward:{results['npc_avoid_reward']}"
             )
 
             if self.monitor:
