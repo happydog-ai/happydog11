@@ -77,8 +77,15 @@ class Preprocessor:
 
         # 获取和官方机器人最近的距离
         self.npc_positions = []
+        self.last_npc_positions = []
         self.nearest_npc_dist = 999.0
         self.last_nearest_npc_dist = 999.0
+
+        # 轨迹/探索/全局污渍记忆
+        self.visited_counts = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.int32)
+        self.explored_mask = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.int8)
+        self.global_dirt_map = np.zeros((self.GRID_SIZE, self.GRID_SIZE), dtype=np.int8)
+        self.unique_visited = 0
 
         self.charger_cells = set()
         self.collision_type = "none"   # none / npc / charger / obstacle
@@ -174,6 +181,7 @@ class Preprocessor:
 
         # npc相关的信息位置以及最近位置
         npcs = frame_state.get("npcs", [])
+        self.last_npc_positions = list(self.npc_positions)
         self.npc_positions = self._get_npc_positions(npcs)
 
         self.last_nearest_npc_dist = self.nearest_npc_dist
@@ -185,6 +193,9 @@ class Preprocessor:
             self._view_map = np.array(map_info, dtype=np.float32)
             hx, hz = self.cur_pos
             self._update_passable(hx, hz)
+            self._update_exploration_and_dirt_map(hx, hz)
+
+        self._update_trajectory()
         self.terminated = bool(env_obs.get("terminated", False))
         # 获取充电桩占用的格子
         organs = frame_state.get("organs", [])
@@ -265,6 +276,29 @@ class Preprocessor:
                     # 0 = obstacle, 1/2 = passable
                     # 0 = 障碍, 1/2 = 可通行
                     self.passable_map[gx, gz] = 1 if view[ri, ci] != 0 else 0
+
+    def _update_exploration_and_dirt_map(self, hx, hz):
+        """Update explored cells and global dirt memory from local view."""
+        view = self._view_map
+        vsize = view.shape[0]
+        half = vsize // 2
+        for ri in range(vsize):
+            for ci in range(vsize):
+                gx = hx - half + ri
+                gz = hz - half + ci
+                if 0 <= gx < self.GRID_SIZE and 0 <= gz < self.GRID_SIZE:
+                    cell = int(view[ri, ci])
+                    self.explored_mask[gx, gz] = 1
+                    # 2=污渍, 1=已清扫/可通行，观测到非污渍时清空旧记忆
+                    self.global_dirt_map[gx, gz] = 1 if cell == 2 else 0
+
+    def _update_trajectory(self):
+        """Update visited count and unique visited counter for current position."""
+        x, z = self.cur_pos
+        if 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE:
+            if self.visited_counts[x, z] == 0:
+                self.unique_visited += 1
+            self.visited_counts[x, z] += 1
 
     def _get_local_view_feature(self):
         """Local view feature (49D): crop center 7×7 from 21×21.
@@ -382,7 +416,100 @@ class Preprocessor:
         返回合法动作掩码（8D list）。
         """
         return list(self._legal_act)
-    
+
+    # 接口: npc速度特征
+    # 返回: [vx_norm, vz_norm, speed_norm] (3D)
+    # 用途: 表征最近NPC运动趋势，辅助避碰决策
+    def _get_npc_velocity_feature(self):
+        """npc速度特征: [vx_norm, vz_norm, speed_norm]."""
+        if not self.npc_positions or not self.last_npc_positions:
+            return np.zeros(3, dtype=np.float32)
+
+        cx, cz = self.cur_pos
+        cur_idx = int(np.argmin([((x - cx) ** 2 + (z - cz) ** 2) for x, z in self.npc_positions]))
+        px, pz = self.npc_positions[cur_idx]
+
+        last_idx = int(np.argmin([((x - px) ** 2 + (z - pz) ** 2) for x, z in self.last_npc_positions]))
+        lx, lz = self.last_npc_positions[last_idx]
+
+        vx = float(px - lx)
+        vz = float(pz - lz)
+        speed = float(np.sqrt(vx * vx + vz * vz))
+        vmax = 5.0
+        return np.array([_norm(vx, vmax, -vmax), _norm(vz, vmax, -vmax), _norm(speed, vmax)], dtype=np.float32)
+
+    # 接口: npc接近方向特征
+    # 返回: [dir_x, dir_z, approaching] (3D)
+    # 用途: 表征最近NPC相对方向与是否逼近
+    def _get_npc_approach_direction_feature(self):
+        """npc接近方向特征: [dir_x, dir_z, approaching]."""
+        if not self.npc_positions:
+            return np.zeros(3, dtype=np.float32)
+
+        hx, hz = self.cur_pos
+        nearest_idx = int(np.argmin([((x - hx) ** 2 + (z - hz) ** 2) for x, z in self.npc_positions]))
+        nx, nz = self.npc_positions[nearest_idx]
+        dx = float(nx - hx)
+        dz = float(nz - hz)
+        dist = float(np.sqrt(dx * dx + dz * dz))
+        if dist > 1e-6:
+            dir_x = dx / dist
+            dir_z = dz / dist
+        else:
+            dir_x, dir_z = 0.0, 0.0
+
+        approaching = 1.0 if self.nearest_npc_dist < self.last_nearest_npc_dist else 0.0
+        return np.array([dir_x, dir_z, approaching], dtype=np.float32)
+
+    # 接口: 轨迹特征（避免重复路径）
+    # 返回: [visit_norm, revisit_flag, unique_visit_ratio] (3D)
+    # 用途: 表征当前位置访问频次与探索新区域能力
+    def _get_trajectory_feature(self):
+        """轨迹特征: [visit_norm, revisit_flag, unique_visit_ratio]."""
+        x, z = self.cur_pos
+        visit = 0
+        if 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE:
+            visit = int(self.visited_counts[x, z])
+
+        visit_norm = _norm(min(visit, 10), 10)
+        revisit_flag = 1.0 if visit > 1 else 0.0
+        total_cells = float(self.GRID_SIZE * self.GRID_SIZE)
+        unique_visit_ratio = float(self.unique_visited) / total_cells
+        return np.array([visit_norm, revisit_flag, unique_visit_ratio], dtype=np.float32)
+
+    # 接口: 全局污渍分布特征
+    # 返回: [known_dirt_ratio, nearby_dirt_density, nearest_dirt_norm] (3D)
+    # 用途: 表征全局污渍记忆和当前位置周边污渍密度
+    def _get_global_dirt_distribution_feature(self):
+        """全局污渍统计特征: [known_dirt_ratio, nearby_dirt_density, nearest_dirt_norm]."""
+        explored = float(np.sum(self.explored_mask))
+        known_dirt = float(np.sum(self.global_dirt_map))
+        known_dirt_ratio = known_dirt / max(explored, 1.0)
+
+        hx, hz = self.cur_pos
+        r = 5
+        x0, x1 = max(hx - r, 0), min(hx + r + 1, self.GRID_SIZE)
+        z0, z1 = max(hz - r, 0), min(hz + r + 1, self.GRID_SIZE)
+        near_patch = self.global_dirt_map[x0:x1, z0:z1]
+        nearby_dirt_density = float(np.mean(near_patch)) if near_patch.size > 0 else 0.0
+
+        nearest_dirt_norm = _norm(self.nearest_dirt_dist, 200.0)
+        return np.array([known_dirt_ratio, nearby_dirt_density, nearest_dirt_norm], dtype=np.float32)
+
+    # 接口: 探索区域/未清扫区域特征
+    # 返回: [explore_ratio, unknown_ratio, uncleaned_ratio] (3D)
+    # 用途: 表征探索进度与剩余清扫压力
+    def _get_exploration_uncleaned_feature(self):
+        """探索/未清扫特征: [explore_ratio, unknown_ratio, uncleaned_ratio]."""
+        total_cells = float(self.GRID_SIZE * self.GRID_SIZE)
+        explored = float(np.sum(self.explored_mask))
+        explore_ratio = explored / total_cells
+        unknown_ratio = 1.0 - explore_ratio
+
+        known_dirt = float(np.sum(self.global_dirt_map))
+        uncleaned_ratio = known_dirt / max(explored, 1.0)
+        return np.array([explore_ratio, unknown_ratio, uncleaned_ratio], dtype=np.float32)
+
     # 将有用的全局特征送到模型里面。
     def feature_process(self, env_obs, last_action):
         """Generate 69D feature vector, legal action mask, and scalar reward.
@@ -401,6 +528,8 @@ class Preprocessor:
         reward,reward_info = self.reward_process()
         self.reward_info = reward_info
         return feature, legal_action, reward
+
+
 
     def reward_process(self):
         """Compute reward.
