@@ -69,7 +69,7 @@ def build_monitor():
         )
         .add_metric(
             metrics_name="npc_avoid_reward",
-            expr="avg(dirt_approach_reward{})",
+            expr="avg(npc_avoid_reward{})",
         )
         .end_panel()
 
@@ -85,16 +85,16 @@ def build_monitor():
         # )
         # .end_panel()
 
-        # .add_panel(
-        #     name="充电桩奖励",
-        #     name_en="charger_reward",
-        #     type="line",
-        # )
-        # .add_metric(
-        #     metrics_name="charger_reward",
-        #     expr="avg(charger_reward{})",
-        # )
-        # .end_panel()
+        .add_panel(
+            name="低电量充电奖励",
+            name_en="charger_reward",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="charger_reward",
+            expr="avg(charger_reward{})",
+        )
+        .end_panel()
 
         .add_panel(
             name="时间惩罚",

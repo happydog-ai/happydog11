@@ -57,6 +57,7 @@ class Preprocessor:
         """
         self.step_no = 0
         self.battery = 600
+        self.last_battery = 600
         self.battery_max = 600
 
         self.cur_pos = (0, 0)
@@ -252,6 +253,7 @@ class Preprocessor:
         self.cur_pos = (int(hero["pos"]["x"]), int(hero["pos"]["z"]))
 
         # 电量
+        self.last_battery = self.battery
         self.battery = int(hero["battery"])
         self.battery_max = max(int(hero["battery_max"]), 1)
 
@@ -434,7 +436,7 @@ class Preprocessor:
 
         delta = self.last_nearest_dirt_dist - self.nearest_dirt_dist
         delta = np.clip(delta, -1.0, 1.0)
-        return 0.12 * delta
+        return 0.15 * delta
 
     def reward_npc_avoid(self):
         """官方机器人避碰惩罚。"""
@@ -448,16 +450,53 @@ class Preprocessor:
         return 0.0
 
     def reward_low_battery_charger(self):
-        """低电量时接近充电桩奖励。"""
-        battery_ratio = self.battery / max(self.battery_max, 1)
+        """充电相关奖励。
 
-        if (
-            self.step_no > 0
-            and battery_ratio < 0.45
-            and self.nearest_charger_dist < self.last_nearest_charger_dist
-        ):
-            return 0.12
-        return 0.0
+        包含两部分：
+        1. 低电量时接近充电桩奖励
+        2. 当前步实际充电奖励（低电量更大，高电量很小）
+        """
+        if self.step_no <= 0 or not self.charger_positions:
+            return 0.0
+
+        reward = 0.0
+        battery_ratio = self.battery / max(self.battery_max, 1)
+        last_battery_ratio = self.last_battery / max(self.battery_max, 1)
+
+        # --------------------------------
+        # 1) 接近充电桩奖励
+        # --------------------------------
+        if self.last_nearest_charger_dist is not None and self.nearest_charger_dist is not None:
+            delta_dist = self.last_nearest_charger_dist - self.nearest_charger_dist
+            delta_dist = float(np.clip(delta_dist, -1.0, 1.0))
+
+            # 只有低电量时，靠近充电桩才值得鼓励
+            if battery_ratio < 0.15:
+                reward += 0.30 * delta_dist
+            elif battery_ratio < 0.30:
+                reward += 0.18 * delta_dist
+            else:
+                # 高电量时如果还故意靠近充电桩，轻微抑制
+                if delta_dist > 0:
+                    reward += -0.02 * delta_dist
+
+        # --------------------------------
+        # 2) 当前步实际充电奖励
+        # --------------------------------
+        battery_gain = self.battery - self.last_battery
+        if battery_gain > 0:
+            gain = float(np.clip(battery_gain, 0.0, 20.0))
+
+            # 上一步越缺电，这一步充上电的奖励越大
+            if last_battery_ratio < 0.15:
+                reward += 0.35 + 0.02 * gain
+            elif last_battery_ratio < 0.30:
+                reward += 0.20 + 0.01 * gain
+            else:
+                # 高电量时充电，只给一个很小奖励
+                reward += 0.03 + 0.002 * gain
+
+        return reward
 
     def reward_collision(self):
         """碰撞类型惩罚。
@@ -484,12 +523,12 @@ class Preprocessor:
         self.idle_streak += 1
         self.clean_streak = 0
         if self.step_no > 0:
-            return -0.02 * min(self.idle_streak, 3)
+            return -0.01 * min(self.idle_streak, 3)
         return 0.0
 
     def reward_time(self):
         """时间惩罚。"""
-        return -0.03
+        return -0.02
 
     def reward_process(self):
         """Compute total reward and reward breakdown."""
@@ -522,6 +561,7 @@ class Preprocessor:
             "collision_reward": float(collision_reward),
             "efficiency_reward": float(efficiency_reward),
             "step_penalty": float(step_penalty),
+            "charging_reward": 0.0,
 
             # 兼容旧监控命名
             "obstacle_reward": float(npc_avoid_reward + collision_reward),
