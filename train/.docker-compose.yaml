@@ -51,7 +51,7 @@ x-kaiwu-client:
 services:
   # ==================== Learner 学习器 ====================
   learner:
-    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/win_gpu:${KAIWU_PROJECT_VERSION}'
+    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/cpu_${KAIWU_CPU_TYPE}:${KAIWU_PROJECT_VERSION}'
     volumes:
       - shared_volume_model:/workspace/train/backup_model
       - shared_volume_train:/workspace/train
@@ -69,20 +69,13 @@ services:
       - bash
       - '-c'
       - "bash /root/tools/start_train_client.sh learner"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
     profiles:
       - single
       - distributed
 
   # ==================== AISrv AI服务器 ====================
   aisrv:
-    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/win_gpu:${KAIWU_PROJECT_VERSION}'
+    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/cpu_${KAIWU_CPU_TYPE}:${KAIWU_PROJECT_VERSION}'
     volumes:
       - shared_volume_model:/workspace/train/backup_model
       - shared_volume_train:/workspace/train
@@ -106,7 +99,7 @@ services:
 
   # ==================== KaiwuEnv 环境包装器 ====================
   kaiwu_env:
-    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/kaiwu_env_x86:${KAIWU_PROJECT_VERSION}'
+    image: 'kaiwu-pub.tencentcloudcr.com/project/${KAIWU_PROJECT_CODE}/edu/kaiwu_env_${KAIWU_CPU_TYPE}:${KAIWU_PROJECT_VERSION}'
     restart: always
     depends_on:
       - gamecore

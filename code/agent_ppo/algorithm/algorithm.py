@@ -158,6 +158,9 @@ class Algorithm:
         ratio = new_prob / old_action_prob.clamp(1e-9)
 
         adv = advantage.squeeze(-1) if advantage.dim() > 1 else advantage
+        # Advantage normalization for more stable PPO updates.
+        # 优势标准化，提升训练稳定性。
+        adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
         adv = adv.unsqueeze(-1)
 
         policy_loss = torch.maximum(

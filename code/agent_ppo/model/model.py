@@ -27,6 +27,28 @@ def _make_fc(in_dim, out_dim, gain=1.41421):
     return layer
 
 
+class ResidualBlock(nn.Module):
+    """Two-layer residual MLP block with LayerNorm."""
+
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.fc1 = _make_fc(hidden_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.fc2 = _make_fc(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.act = nn.ReLU()
+
+    def forward(self, x):
+        identity = x
+        out = self.fc1(x)
+        out = self.ln1(out)
+        out = self.act(out)
+        out = self.fc2(out)
+        out = self.ln2(out)
+        out = self.act(out + identity)
+        return out
+
+
 class Model(nn.Module):
     """Dual-head MLP for Robot Vacuum.
 
@@ -41,18 +63,35 @@ class Model(nn.Module):
         obs_dim = Config.DIM_OF_OBSERVATION  # 69
         act_num = Config.ACTION_NUM  # 8
 
+        hidden_dim = 256
+
         # Shared backbone / 共享骨干网络
-        self.backbone = nn.Sequential(
-            _make_fc(obs_dim, 128),
+        self.input_proj = nn.Sequential(
+            _make_fc(obs_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+        )
+        self.shared_blocks = nn.Sequential(
+            ResidualBlock(hidden_dim),
+            ResidualBlock(hidden_dim),
+        )
+
+        # Actor branch / 策略分支
+        self.actor_mlp = nn.Sequential(
+            _make_fc(hidden_dim, 128),
             nn.ReLU(),
             _make_fc(128, 64),
             nn.ReLU(),
         )
-
-        # Actor head: outputs action logits / 策略头：输出动作 logits
         self.actor_head = _make_fc(64, act_num, gain=0.01)
 
-        # Critic head: outputs single state value / 价值头：输出单个状态价值
+        # Critic branch / 价值分支
+        self.critic_mlp = nn.Sequential(
+            _make_fc(hidden_dim, 128),
+            nn.ReLU(),
+            _make_fc(128, 64),
+            nn.ReLU(),
+        )
         self.critic_head = _make_fc(64, 1, gain=0.01)
 
     def forward(self, s, inference=False):
@@ -61,9 +100,14 @@ class Model(nn.Module):
         前向传播。
         """
         x = s.to(torch.float32)
-        h = self.backbone(x)
-        logits = self.actor_head(h)
-        value = self.critic_head(h)
+        h = self.input_proj(x)
+        h = self.shared_blocks(h)
+
+        actor_h = self.actor_mlp(h)
+        critic_h = self.critic_mlp(h)
+
+        logits = self.actor_head(actor_h)
+        value = self.critic_head(critic_h)
         return [logits, value]
 
     def set_train_mode(self):

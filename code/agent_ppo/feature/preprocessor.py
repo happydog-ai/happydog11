@@ -512,9 +512,9 @@ class Preprocessor:
 
     # 将有用的全局特征送到模型里面。
     def feature_process(self, env_obs, last_action):
-        """Generate 69D feature vector, legal action mask, and scalar reward.
+        """Generate feature vector, legal action mask, and scalar reward.
 
-        生成 69D 特征向量、合法动作掩码和标量奖励。
+        生成特征向量、合法动作掩码和标量奖励。
         """
         self.pb2struct(env_obs, last_action)
 
@@ -522,8 +522,24 @@ class Preprocessor:
         global_state = self._get_global_state_feature()  # 12D
         legal_action = self.get_legal_action()  # 8D
         legal_arr = np.array(legal_action, dtype=np.float32)
+        npc_velocity = self._get_npc_velocity_feature()  # 3D
+        npc_approach = self._get_npc_approach_direction_feature()  # 3D
+        trajectory = self._get_trajectory_feature()  # 3D
+        global_dirt = self._get_global_dirt_distribution_feature()  # 3D
+        exploration = self._get_exploration_uncleaned_feature()  # 3D
 
-        feature = np.concatenate([local_view, global_state, legal_arr])  # 69D
+        feature = np.concatenate(
+            [
+                local_view,
+                global_state,
+                legal_arr,
+                npc_velocity,
+                npc_approach,
+                trajectory,
+                global_dirt,
+                exploration,
+            ]
+        )  # 84D
 
         reward,reward_info = self.reward_process()
         self.reward_info = reward_info
@@ -560,6 +576,7 @@ class Preprocessor:
             npc_avoid_reward = -0.5 # 距离过近的时候给个很大的惩罚
         elif self.nearest_npc_dist < safe_npc_dist:
             npc_avoid_reward = -0.1 * (safe_npc_dist - self.nearest_npc_dist)
+        obstacle_reward += npc_avoid_reward
 
         # 4) Low-battery charger reward / 低电量时接近充电桩奖励（固定奖励）
         battery_ratio = self.battery / max(self.battery_max, 1)
