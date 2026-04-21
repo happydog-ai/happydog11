@@ -87,8 +87,14 @@ class Agent(BaseAgent):
 
         final_action = model_action
 
+        # 卡墙脱困优先：避免连续顶墙时继续输出朝墙动作
+        use_unstuck_guide = float(getattr(self.preprocessor, "use_unstuck_guide", 0.0))
+        unstuck_action = int(getattr(self.preprocessor, "unstuck_action", -1))
+        if use_unstuck_guide > 0.5 and unstuck_action >= 0:
+            final_action = unstuck_action
+
         # 只有低电量时，才去计算规则动作
-        if battery_ratio < low_battery_threshold:
+        if final_action == model_action and battery_ratio < low_battery_threshold:
             rule_action = int(self.preprocessor.get_rule_action())
             use_rule_guide = float(getattr(self.preprocessor, "use_rule_guide", 0.0))
 

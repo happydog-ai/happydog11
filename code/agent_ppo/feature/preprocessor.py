@@ -11,6 +11,7 @@ Feature preprocessor for Robot Vacuum.
 """
 
 import numpy as np
+from collections import deque
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -36,6 +37,7 @@ class Preprocessor:
     GLOBAL_REDUCED_SIZE = 16
     # 动作落点到 NPC 锚点（当前格中心 + 预测一步）的最小欧氏距离小于该值则禁止（不用 8 邻离散扩圈）
     NPC_KEEPOUT_RADIUS = 2.0
+    CHARGER_PATH_MAX_EXPAND = 4500
 
     def __init__(self):
         self.reset()
@@ -75,6 +77,8 @@ class Preprocessor:
         self.charger_cells = set()
         self.nearest_charger_dist = 999.0
         self.last_nearest_charger_dist = 999.0
+        self.nearest_charger_path_dist = 999.0
+        self.last_nearest_charger_path_dist = 999.0
 
         # Obstacle distance
         self.nearest_obstacle_dist = 999.0
@@ -106,6 +110,8 @@ class Preprocessor:
         self.rule_action = -1          # 当前规则动作，-1 表示无
         self.use_rule_guide = 0.0      # 当前状态是否建议使用规则引导
         self.on_charger = 0.0          # 当前是否在充电桩区域
+        self.unstuck_action = -1       # 卡墙脱困动作
+        self.use_unstuck_guide = 0.0   # 当前是否建议执行脱困动作
 
     def _get_npc_positions(self, npcs):
         """Extract npc positions from frame_state['npcs'].""" 
@@ -138,6 +144,58 @@ class Preprocessor:
             dist = ((cx - hx) ** 2 + (cz - hz) ** 2) ** 0.5
             min_dist = min(min_dist, dist)
         return float(min_dist)
+
+    def _calc_shortest_path_dist_to_targets(self, start, targets, max_expand=None):
+        """在 passable_map 上计算 start 到 targets 的最短步数（8 邻接）。"""
+        if not targets:
+            return 999.0
+
+        sx, sz = int(start[0]), int(start[1])
+        if not (0 <= sx < self.GRID_SIZE and 0 <= sz < self.GRID_SIZE):
+            return 999.0
+
+        target_set = {(int(x), int(z)) for x, z in targets}
+        if (sx, sz) in target_set:
+            return 0.0
+
+        if max_expand is None:
+            max_expand = self.CHARGER_PATH_MAX_EXPAND
+
+        dirs = self._get_action_dirs()
+        q = deque([(sx, sz, 0)])
+        visited = {(sx, sz)}
+        expanded = 0
+
+        while q:
+            x, z, d = q.popleft()
+            expanded += 1
+            if expanded > max_expand:
+                break
+
+            for dx, dz in dirs:
+                nx, nz = x + dx, z + dz
+                if not (0 <= nx < self.GRID_SIZE and 0 <= nz < self.GRID_SIZE):
+                    continue
+                if (nx, nz) in visited:
+                    continue
+
+                # 目标格允许进入；其他格必须可通行
+                if (nx, nz) not in target_set and int(self.passable_map[nx, nz]) == 0:
+                    continue
+
+                if (nx, nz) in target_set:
+                    return float(d + 1)
+
+                visited.add((nx, nz))
+                q.append((nx, nz, d + 1))
+
+        return 999.0
+
+    def _calc_nearest_charger_path_dist(self):
+        """计算当前位置到充电桩区域的最短路距离（不可达返回 999）。"""
+        if not self.charger_cells:
+            return 999.0
+        return self._calc_shortest_path_dist_to_targets(self.cur_pos, self.charger_cells)
 
     def _calc_nearest_obstacle_dist(self):
         """Find nearest obstacle distance from local view.
@@ -318,6 +376,8 @@ class Preprocessor:
 
         self.last_nearest_charger_dist = self.nearest_charger_dist
         self.nearest_charger_dist = self._calc_nearest_charger_dist()
+        self.last_nearest_charger_path_dist = self.nearest_charger_path_dist
+        self.nearest_charger_path_dist = self._calc_nearest_charger_path_dist()
 
         # NPCs
         npcs = frame_state.get("npcs", [])
@@ -575,6 +635,50 @@ class Preprocessor:
         self.wall_bump_count = 0
         return 0.0
 
+    def _update_unstuck_guide(self):
+        """根据当前卡墙状态生成脱困动作。"""
+        self.unstuck_action = -1
+        self.use_unstuck_guide = 0.0
+
+        if self.no_move_count < 2:
+            return
+        if not self._is_last_action_blocked():
+            return
+
+        if self.last_action < 0 or self.last_action >= 8:
+            return
+
+        dirs = self._get_action_dirs()
+        last_dir = dirs[self.last_action]
+        lx, lz = float(last_dir[0]), float(last_dir[1])
+        last_norm = float(np.sqrt(lx * lx + lz * lz))
+
+        best_act = -1
+        best_score = -1e9
+        for act, (dx, dz) in enumerate(dirs):
+            if self._legal_act[act] != 1:
+                continue
+
+            mx, mz = float(dx), float(dz)
+            move_norm = float(np.sqrt(mx * mx + mz * mz))
+            align = (lx * mx + lz * mz) / max(last_norm * move_norm, 1e-6)
+            turn_steps = min((act - self.last_action) % 8, (self.last_action - act) % 8)
+
+            # 倾向于先“侧转”脱困，而不是继续顶或直接后退
+            score = (-align) + 0.18 * float(turn_steps)
+            if turn_steps == 4:
+                score -= 0.15
+            if align > 0.6:
+                score -= 0.8
+
+            if score > best_score:
+                best_score = score
+                best_act = act
+
+        if best_act >= 0:
+            self.unstuck_action = int(best_act)
+            self.use_unstuck_guide = 1.0
+
     def _get_global_state_feature(self):
         """Global state feature (13D)."""
         step_norm = _norm(self.step_no, 2000)
@@ -811,6 +915,9 @@ class Preprocessor:
         )  # 1509D
 
         reward, reward_info = self.reward_process()
+        self._update_unstuck_guide()
+        reward_info["unstuck_action"] = int(self.unstuck_action)
+        reward_info["use_unstuck_guide"] = float(self.use_unstuck_guide)
         self.reward_info = reward_info
         return feature, legal_action, reward
 
@@ -890,8 +997,15 @@ class Preprocessor:
         if self.step_no <= 0 or battery_ratio >= self.low_battery_threshold:
             return 0.0
 
-        delta = float(self.last_nearest_charger_dist - self.nearest_charger_dist)
-        reward = 0.12 * np.clip(delta, -2.0, 2.0)
+        # 使用最短路距离，避免“隔墙欧氏更近”导致顶墙卡住
+        prev_path = float(self.last_nearest_charger_path_dist)
+        cur_path = float(self.nearest_charger_path_dist)
+        if prev_path < 900.0 and cur_path < 900.0:
+            delta = prev_path - cur_path
+            reward = 0.10 * np.clip(delta, -2.0, 2.0)
+        else:
+            delta = float(self.last_nearest_charger_dist - self.nearest_charger_dist)
+            reward = 0.03 * np.clip(delta, -2.0, 2.0)
         return float(reward)
 
     def _get_low_battery_charging_reward(self):
@@ -915,7 +1029,12 @@ class Preprocessor:
         if self.step_no <= 0 or battery_ratio >= self.low_battery_threshold:
             return 0.0
 
-        delta = float(self.nearest_charger_dist - self.last_nearest_charger_dist)
+        prev_path = float(self.last_nearest_charger_path_dist)
+        cur_path = float(self.nearest_charger_path_dist)
+        if prev_path < 900.0 and cur_path < 900.0:
+            delta = cur_path - prev_path
+        else:
+            delta = float(self.nearest_charger_dist - self.last_nearest_charger_dist)
         if delta > 0:
             return -0.05 * min(delta, 2.0)
         return 0.0
@@ -974,8 +1093,18 @@ class Preprocessor:
             nz = hz + az
             new_dist = np.sqrt((cx - nx) ** 2 + (cz - nz) ** 2)
             approach_bonus = 1.0 if new_dist < dist else -1.0
+            # 低电量规则也参考可达路径，减轻“隔墙冲桩”
+            path_dist = self._calc_shortest_path_dist_to_targets(
+                (nx, nz),
+                self.charger_cells,
+                max_expand=2000,
+            )
+            if path_dist < 900.0 and self.nearest_charger_path_dist < 900.0:
+                path_bonus = 1.0 if path_dist < self.nearest_charger_path_dist else -1.0
+            else:
+                path_bonus = 0.0
 
-            score = direction_score + 0.5 * approach_bonus
+            score = direction_score + 0.5 * approach_bonus + 0.8 * path_bonus
 
             if score > best_score:
                 best_score = score
