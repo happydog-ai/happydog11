@@ -67,7 +67,6 @@ class Preprocessor:
         self.dirt_prefer_weight = 0.35
         self.npc_avoid_radius = 2.5
         self.goal_center_tolerance = 1.0
-        self.robot_radius_cells = 1      # A* 规划时考虑机器人半径（单位：格）
 
         # Global passable map (0=obstacle, 1=passable), used for ray computation
         self.passable_map = np.ones((self.GRID_SIZE, self.GRID_SIZE), dtype=np.int8)
@@ -106,8 +105,8 @@ class Preprocessor:
         self.reward_info = {}
 
         # Low battery guide
-        self.low_battery_threshold = 0.35
-        self.very_low_battery_threshold = 0.25
+        self.low_battery_threshold = 0.30
+        self.very_low_battery_threshold = 0.15
 
         self.rule_action = -1          # 当前规则动作，-1 表示无
         self.use_rule_guide = 0.0      # 当前状态是否建议使用规则引导
@@ -339,11 +338,12 @@ class Preprocessor:
         规则：
         - map_info == 0 表示障碍/边界，不可通行
         - 若目标格属于充电桩区域，则仍视为可通行
-        - 关键兜底：返回结果绝不允许全 0，避免后续 softmax 分母为 0
+        - 若一步后会过于接近 NPC，则该动作视为不可行
         """
         if self._view_map is None:
             return [1] * 8
 
+        center = self.VIEW_HALF
         action_dirs = self._get_action_dirs()
         legal = [1] * 8
         hx, hz = self.cur_pos
@@ -362,13 +362,15 @@ class Preprocessor:
                 legal[act] = 0
                 continue
 
-        legal = [int(x) for x in legal]
+            # 额外过滤：一步后如果离 NPC 太近，也禁掉
+            for nx, nz in self.npc_positions:
+                dist = math.sqrt((gx - nx) ** 2 + (gz - nz) ** 2)
+                if dist < 1.5:
+                    legal[act] = 0
+                    break
 
-        # 兜底：绝不允许全 0
-        if sum(legal) == 0:
-            legal = [1] * 8
+        return [int(x) for x in legal]
 
-        return legal
     def pb2struct(self, env_obs, last_action):
 
         """Parse and cache essential fields from observation dict.
@@ -694,13 +696,8 @@ class Preprocessor:
 
     def get_legal_action(self):
         """Return legal action mask (8D list)."""
-        legal = list(self._legal_act)
+        return list(self._legal_act)
 
-        # 再做一层保险，避免任何情况下 legal_action 全 0
-        if sum(legal) == 0:
-            legal = [1] * 8
-
-        return legal
     def _get_npc_velocity_feature(self):
         """npc速度特征: [vx_norm, vz_norm, speed_norm]."""
         if not self.npc_positions or not self.last_npc_positions:
@@ -907,7 +904,7 @@ class Preprocessor:
         return float(reward)
 
     def _get_low_battery_charging_reward(self):
-        """低电量时到达充电桩并实际充电的奖励（调小版）。"""
+        """低电量时到达充电桩并实际充电的奖励。"""
         battery_ratio = float(self.battery) / max(float(self.battery_max), 1.0)
         on_charger = (self.cur_pos in self.charger_cells) or (self.collision_type == "charger")
 
@@ -915,12 +912,12 @@ class Preprocessor:
         if battery_ratio >= self.low_battery_threshold or not on_charger:
             return 0.0
 
-        reward = 0.45
+        reward = 0.8
         battery_gain = self.battery - self.last_battery
 
         # 真正开始回血，再给额外奖励
         if battery_gain > 0:
-            reward += 0.15 + 0.02 * min(battery_gain, 10)
+            reward += 0.25 + 0.03 * min(battery_gain, 10)
 
         return float(reward)
     def _get_low_battery_leave_charger_penalty(self):
@@ -956,13 +953,7 @@ class Preprocessor:
         return bool(explored and passable)
 
     def _get_cleaned_region_revisit_penalty(self):
-        """基于当前位置访问次数的回头路惩罚（增强版）。
-
-        规则：
-        - 只在已清扫/无收益区域生效
-        - 当前位置访问次数越多，惩罚越大
-        - 没移动则不在这里罚，交给 no_move_penalty
-        """
+        """连续走在已清扫区域时的递增惩罚。"""
         if self.step_no <= 0:
             return 0.0
 
@@ -971,37 +962,18 @@ class Preprocessor:
             self.cleaned_region_walk_streak = 0
             return 0.0
 
-        if not self._is_current_on_cleaned_region():
-            self.cleaned_region_walk_streak = 0
-            return 0.0
+        if self._is_current_on_cleaned_region():
+            self.cleaned_region_walk_streak += 1
+            penalty = -min(0.02 * self.cleaned_region_walk_streak, 0.12)
+            return float(penalty)
 
-        x, z = self.cur_pos
-        visit_cnt = 0
-        if 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE:
-            visit_cnt = int(self.visited_counts[x, z])
+        self.cleaned_region_walk_streak = 0
+        return 0.0
 
-        # 第一次到达不罚，从第二次开始递增惩罚
-        if visit_cnt <= 1:
-            self.cleaned_region_walk_streak = 0
-            return 0.0
-
-        # 仍然保留一个连续计数，便于日志观察
-        self.cleaned_region_walk_streak += 1
-
-        penalty = -min(0.09 * (visit_cnt - 1), 0.54)
-        return float(penalty)
     def _get_high_battery_charger_penalty(self):
-        """高电量时充电/赖在充电桩上的大惩罚。
-
-        规则：
-        - 仅当处于高电量状态时生效
-        - 如果当前在充电桩上，并且当前电量 >= 上一步电量，
-          说明此时仍在充电或至少没有离开充电状态，直接给大惩罚
-        - 即使没有明显回血，只要高电量赖在充电桩上，也给惩罚
-        """
+        """高电量时赖在充电桩附近/上面的惩罚。"""
         battery_ratio = float(self.battery) / max(float(self.battery_max), 1.0)
         on_charger = (self.cur_pos in self.charger_cells) or (self.collision_type == "charger")
-        battery_gain = self.battery - self.last_battery
 
         if not on_charger:
             return 0.0
@@ -1010,22 +982,14 @@ class Preprocessor:
         if battery_ratio < self.low_battery_threshold:
             return 0.0
 
-        # 高电量下，只要当前电量 >= 上一步电量，视为不合理充电，给大惩罚
-        if battery_gain >= 0:
-            if battery_ratio >= 0.8:
-                return -1.2
-            elif battery_ratio >= 0.6:
-                return -1.0
-            else:
-                return -0.8
-
-        # 即使没有回血，只要高电量仍赖在充电桩上，也给惩罚
+        # 电量越高，越不应该赖在充电桩
         if battery_ratio >= 0.8:
-            return -0.8
+            return -0.5
         elif battery_ratio >= 0.6:
-            return -0.6
-        else:
             return -0.4
+        else:
+            return -0.3
+
     def _get_step_penalty(self):
         """时间步惩罚。"""
         return -0.001
@@ -1034,9 +998,12 @@ class Preprocessor:
         """返回低电量时基于 A* 的规则动作。
 
         目标：
-        - 仅使用 A* 朝最近充电桩中心规划
-        - 不再使用局部贪心回退
-        - A* 失败时直接返回 -1
+        - 接近最近充电桩中心
+        - 而不是仅仅进入 charger 区域
+
+        注意：
+        - 本函数只在外部“规则启用”时调用
+        - 不在 feature_process() 中主动调用
         """
         battery_ratio = float(self.battery) / max(float(self.battery_max), 1.0)
 
@@ -1070,6 +1037,7 @@ class Preprocessor:
         # self._save_global_dirt_map()
 
         if len(path) >= 2:
+            self.cur_pos
             cur = path[0]
             nxt = path[1]
             dx = int(nxt[0] - cur[0])
@@ -1082,10 +1050,17 @@ class Preprocessor:
                 self.use_rule_guide = 1.0
                 return act
 
-        # 只用 A*，失败就直接返回 -1
+        # A* 失败时回退到局部贪心
+        fallback_act = self._get_greedy_charger_action_fallback()
+        if fallback_act >= 0:
+            self.rule_action = fallback_act
+            self.use_rule_guide = 1.0
+            return fallback_act
+
         self.rule_action = -1
         self.use_rule_guide = 0.0
         return -1
+
     def _dir_to_action(self, dx, dz):
         """将一步位移映射为动作编号。"""
         action_dirs = self._get_action_dirs()
@@ -1098,39 +1073,16 @@ class Preprocessor:
         """判断是否在地图范围内。"""
         return 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE
 
-    def _is_robot_footprint_collision_free(self, x, z):
-        """检查机器人以 (x, z) 为中心时，其半径范围内是否与障碍冲突。"""
-        if not self._in_bounds(x, z):
-            return False
-
-        r = int(self.robot_radius_cells)
-
-        for dx in range(-r, r + 1):
-            for dz in range(-r, r + 1):
-                # 用圆形近似机器人 footprint
-                if dx * dx + dz * dz > r * r:
-                    continue
-
-                nx = x + dx
-                nz = z + dz
-
-                if not self._in_bounds(nx, nz):
-                    return False
-
-                # 充电桩区域允许进入
-                if (int(nx), int(nz)) in self.charger_cells:
-                    continue
-
-                if self.passable_map[nx, nz] != 1:
-                    return False
-
-        return True
-
     def _is_passable_for_planning(self, x, z):
-        """A* 规划时判断机器人带半径后是否可通行。"""
+        """A* 规划时判断格子是否可通行。"""
         if not self._in_bounds(x, z):
             return False
-        return self._is_robot_footprint_collision_free(x, z)
+
+        if (int(x), int(z)) in self.charger_cells:
+            return True
+
+        return bool(self.passable_map[x, z] == 1)
+
     def _get_nearest_charger_center(self):
         """获取离当前位置最近的充电桩中心。"""
         if not self.charger_positions:
@@ -1319,6 +1271,54 @@ class Preprocessor:
 
         return []
 
+    def _get_greedy_charger_action_fallback(self):
+        """A* 失败时的回退策略：保留你原来的局部贪心规则。"""
+        if not self.charger_positions:
+            return -1
+
+        hx, hz = self.cur_pos
+
+        nearest_idx = int(np.argmin([
+            (cx - hx) ** 2 + (cz - hz) ** 2 for cx, cz in self.charger_positions
+        ]))
+        cx, cz = self.charger_positions[nearest_idx]
+
+        dx = float(cx - hx)
+        dz = float(cz - hz)
+
+        if abs(dx) < 1e-6 and abs(dz) < 1e-6:
+            return -1
+
+        dist = np.sqrt(dx * dx + dz * dz)
+        target_dir = (dx / dist, dz / dist)
+
+        action_dirs = self._get_action_dirs()
+
+        best_act = -1
+        best_score = -1e9
+
+        for act, (ax, az) in enumerate(action_dirs):
+            if self._legal_act[act] != 1:
+                continue
+
+            move_len = np.sqrt(ax * ax + az * az)
+            move_dir = (ax / move_len, az / move_len)
+
+            direction_score = move_dir[0] * target_dir[0] + move_dir[1] * target_dir[1]
+
+            nx = hx + ax
+            nz = hz + az
+            new_dist = np.sqrt((cx - nx) ** 2 + (cz - nz) ** 2)
+            approach_bonus = 1.0 if new_dist < dist else -1.0
+
+            score = direction_score + 0.5 * approach_bonus
+
+            if score > best_score:
+                best_score = score
+                best_act = act
+
+        return best_act
+
     def _save_global_dirt_map(self):
         """保存全局污渍图为 PNG，方便检查污渍累计是否合理。"""
         try:
@@ -1371,7 +1371,6 @@ class Preprocessor:
         - 低电量时允许并鼓励合理回充
         - 高电量赖在充电桩上要惩罚
         - 连续走在已清扫区域时给递增惩罚
-        - 增加不动惩罚，抑制原地停滞
         """
         low_battery_mode = self._is_low_battery_mode()
 
@@ -1384,8 +1383,7 @@ class Preprocessor:
         npc_avoid_reward = self._get_npc_avoid_reward()
         cleaned_region_revisit_penalty = self._get_cleaned_region_revisit_penalty()
         step_penalty = self._get_step_penalty()
-        no_move_penalty = self._get_no_move_penalty()
-
+        no_move_penalty = 0;
         # ===== 充电相关 =====
         charger_approach_reward = self._get_low_battery_charger_approach_reward()
         leave_charger_penalty = self._get_low_battery_leave_charger_penalty()
@@ -1403,7 +1401,7 @@ class Preprocessor:
             + cleaned_region_revisit_penalty
             + step_penalty
             + battery_dead_penalty
-            + no_move_penalty
+            +no_move_penalty
         )
 
         if low_battery_mode:

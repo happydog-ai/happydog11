@@ -23,7 +23,7 @@ if __name__ == "__main__":
         env_vars={
             "replay_buffer_capacity": "10000",
             "preload_ratio": "0.8",
-            "train_batch_size": "512",
+            "train_batch_size": "2",
             "dump_model_freq": "100",
         },
     )
