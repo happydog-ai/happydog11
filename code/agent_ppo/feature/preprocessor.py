@@ -281,16 +281,77 @@ class Preprocessor:
             min_dist = min(min_dist, dist)
         return float(min_dist)
 
+    def _calc_astar_distance_to_goal(self, goal):
+        """计算当前位置到 goal 的纯几何 A* 距离（不含额外策略代价）。"""
+        if goal is None:
+            return 999.0
+
+        start = (int(self.cur_pos[0]), int(self.cur_pos[1]))
+        gx, gz = int(goal[0]), int(goal[1])
+
+        if not self._is_passable_for_planning(start[0], start[1]):
+            return 999.0
+
+        goal_radius = float(self.goal_center_tolerance)
+        if math.sqrt((start[0] - gx) ** 2 + (start[1] - gz) ** 2) <= goal_radius:
+            return 0.0
+
+        open_heap = []
+        heapq.heappush(
+            open_heap,
+            (self._astar_heuristic_to_center(start[0], start[1], (gx, gz)), 0.0, start)
+        )
+        g_score = {start: 0.0}
+        closed = set()
+        action_dirs = self._get_action_dirs()
+
+        while open_heap:
+            _, cur_g, current = heapq.heappop(open_heap)
+            if current in closed:
+                continue
+            closed.add(current)
+
+            cx, cz = current
+            if math.sqrt((cx - gx) ** 2 + (cz - gz) ** 2) <= goal_radius:
+                return float(cur_g)
+
+            for dx, dz in action_dirs:
+                nx = cx + dx
+                nz = cz + dz
+                nxt = (nx, nz)
+
+                if not self._is_passable_for_planning(nx, nz):
+                    continue
+
+                # 防止对角穿墙，和主 A* 保持一致
+                if dx != 0 and dz != 0:
+                    side1 = (cx + dx, cz)
+                    side2 = (cx, cz + dz)
+                    side1_ok = self._is_passable_for_planning(side1[0], side1[1])
+                    side2_ok = self._is_passable_for_planning(side2[0], side2[1])
+                    if not (side1_ok and side2_ok):
+                        continue
+
+                step_cost = math.sqrt(2.0) if (dx != 0 and dz != 0) else 1.0
+                tentative_g = cur_g + step_cost
+
+                if tentative_g < g_score.get(nxt, float("inf")):
+                    g_score[nxt] = tentative_g
+                    f = tentative_g + self._astar_heuristic_to_center(nx, nz, (gx, gz))
+                    heapq.heappush(open_heap, (f, tentative_g, nxt))
+
+        return 999.0
+
     def _calc_nearest_charger_dist(self):
-        """计算当前位置到最近充电桩中心的欧氏距离。"""
+        """计算当前位置到最近充电桩中心的 A* 距离。"""
         if not self.charger_positions:
             return 999.0
 
-        hx, hz = self.cur_pos
         min_dist = 999.0
-        for cx, cz in self.charger_positions:
-            dist = ((cx - hx) ** 2 + (cz - hz) ** 2) ** 0.5
-            min_dist = min(min_dist, dist)
+        for goal in self.charger_positions:
+            dist = self._calc_astar_distance_to_goal(goal)
+            if dist < min_dist:
+                min_dist = dist
         return float(min_dist)
 
     def _calc_nearest_obstacle_dist(self):
@@ -1050,7 +1111,7 @@ class Preprocessor:
             self.use_rule_guide = 0.0
             return -1
 
-        goal = self._get_nearest_charger_center()
+        goal = self._get_best_charger_center_by_astar()
         if goal is None:
             self.rule_action = -1
             self.use_rule_guide = 0.0
@@ -1143,6 +1204,23 @@ class Preprocessor:
         cx, cz = self.charger_positions[nearest_idx]
         return (int(cx), int(cz))
 
+    def _get_best_charger_center_by_astar(self):
+        """在所有充电桩中心中选择 A* 路径距离最短且可达的目标。"""
+        if not self.charger_positions:
+            return None
+
+        best_goal = None
+        best_dist = float("inf")
+        for goal in self.charger_positions:
+            dist = self._calc_astar_distance_to_goal(goal)
+            if dist < best_dist:
+                best_dist = dist
+                best_goal = (int(goal[0]), int(goal[1]))
+
+        if best_goal is None or best_dist >= 999.0:
+            return None
+        return best_goal
+
     def _astar_heuristic_to_center(self, x, z, goal):
         """A* 启发函数：到充电桩中心的 octile distance。"""
         gx, gz = goal
@@ -1227,7 +1305,7 @@ class Preprocessor:
         """
         start = (int(self.cur_pos[0]), int(self.cur_pos[1]))
 
-        goal = self._get_nearest_charger_center()
+        goal = self._get_best_charger_center_by_astar()
         if goal is None:
             return []
 
